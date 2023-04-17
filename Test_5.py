@@ -5,20 +5,19 @@ Created on Sun Apr 16 07:51:32 2023
 @author: naouf
 """
 
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.integrate import solve_ivp
-from scipy.optimize import curve_fit
 import tkinter as tk
-from tkinter import *
 from tkinter import filedialog, messagebox
-import matplotlib
-matplotlib.use('tkagg')
 import pandas as pd
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.integrate import solve_ivp
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+t_exp = None
+Dg_exp = None
 
-
-def fenton_reaction(t, y, I, V, F, ki):
+def fenton_reaction(t, y, I, V, F, *ki):
     Fe2p, H2O2, Fe3p, OHm, Hp, OHpt, HO2pt, O2ptm = y
     V_m3 = V / 1000
 
@@ -130,21 +129,21 @@ def fenton_reaction(t, y, I, V, F, ki):
     return dydt
 
 
-def run_simulation():
-    I = float(entry_I.get())
-    V = float(entry_V.get())
-    H2O2 = float(entry_H2O2.get())
-    pH = float(entry_pH.get())
-
+def degradation_model(t, ka, kb, kc, I, V, H2O2_0, ki, pH):
+    
     # Constants
     F = 9.64853e4 # Faraday Constant in C.mol-1
-
-    # System parameters
-    pH = pH
-    I = I
-    V = V
-
-    # Kinetic constants
+    
+    # Concentrations initiales
+    Fe2p_0 = 0.0
+    Fe3p_0 = 0.0
+    OHm_0 = 10**(-pH)
+    Hp_0 = 10**(-14) / OHm_0
+    OHpt_0 = 0.0
+    HO2pt_0 = 0.0
+    O2ptm_0 = 0.0
+    
+    # Les valeurs des constantes cinétiques ki
     ki = np.array([
         6.3e-2, # 1
         2.0e-6, # 2
@@ -166,168 +165,141 @@ def run_simulation():
         1.3e-4  # 18
     ])  # in mol.m-3.s-1
 
-    # Initial concentrations
-    y0 = np.array([
-        0,                  # Fe2p_0
-        2e-3,               # H2O2_0
-        0,                  # Fe3p_0
-        10**(pH-14),        # OHm_0
-        10**(-pH),          # Hp_0
-        0,                  # OHpt_0
-        0,                  # HO2pt_0
-        0                   # O2ptm_0
-    ])
-
-
-    # Calculer les concentrations initiales et autres paramètres
-    # ...
-
-    t_start = 0
-    t_end = 1800
-    num_points = 10000
+    # Conditions initiales
+    y0 = [Fe2p_0, H2O2_0, Fe3p_0, pH, OHpt_0, HO2pt_0, O2ptm_0]
 
     # Résoudre le système d'équations différentielles
-    sol = solve_ivp(
-        lambda t, y: fenton_reaction(t, y, I, V, F, ki),
-        (t_start, t_end),
-        y0,
-        method="Radau",
-        t_eval=np.linspace(t_start, t_end, num_points),
-    )
+    sol = solve_ivp(fenton_reaction, (t[0], t[-1]), y0, args=(I, V, ki), t_eval=t, method='Radau', rtol=1e-6, max_step=1e-2)
 
- 
-class Application(tk.Frame):
-    def __init__(self, master=None):
-        super().__init__(master)
-        self.master = master
-        self.master.title("Importer fichier Excel et Fitting")
+    # Extraire les concentrations des radicaux à partir de la solution
+    OHpt = sol.y[5]
+    HO2pt = sol.y[6]
+    O2ptm = sol.y[7]
 
-        self.lbl_a = tk.Label(self.master, text="a:")
-        self.lbl_a.grid(row=0, column=0)
-        self.entry_a = tk.Entry(self.master, state="readonly")
-        self.entry_a.grid(row=0, column=1)
+    # Calculer la dégradation du VM
+    Dg = ((ka * OHpt) + (kb * HO2pt) + (kc * O2ptm))
 
-        self.lbl_b = tk.Label(self.master, text="b:")
-        self.lbl_b.grid(row=1, column=0)
-        self.entry_b = tk.Entry(self.master, state="readonly")
-        self.entry_b.grid(row=1, column=1)
+    return Dg
 
-        self.lbl_c = tk.Label(self.master, text="c:")
-        self.lbl_c.grid(row=2, column=0)
-        self.entry_c = tk.Entry(self.master, state="readonly")
-        self.entry_c.grid(row=2, column=1)
 
-        self.canvas = tk.Canvas(self.master, width=1000, height=1000)
-        self.canvas.grid(row=3, columnspan=2)
-
-        self.btn_import = tk.Button(self.master, text="Importer fichier Excel", command=self.import_excel)
-        self.btn_import.grid(row=4, columnspan=2)
-
-    def import_excel(self):
-        file_path = filedialog.askopenfilename()
-        df = pd.read_excel(file_path)
-
-        t = df['temps']
-        Dg = df['degradation']
-
+def import_excel():
+    global t_exp, Dg_exp
+    file_path = filedialog.askopenfilename(filetypes=[("Fichiers Excel", "*.xlsx;*.xls")])
+    if file_path:
         try:
-            popt, pcov = curve_fit(self.model, t, Dg)
-        except Exception as e:
-            messagebox.showerror("Erreur de Fitting", str(e))
-            return
+            data = pd.read_excel(file_path)
+            t_exp = data['t'].to_numpy()
+            Dg_exp = data['Dg'].to_numpy()
+        except KeyError as e:
+            messagebox.showerror("Erreur", f"Colonne manquante dans le fichier Excel : {e}")
 
-        a, b, c = popt
-        a_err, b_err, c_err = np.sqrt(np.diag(pcov))
+def analyze():
+    global t_exp, Dg_exp
+    if t_exp is None or Dg_exp is None:
+        messagebox.showerror("Erreur", "Veuillez importer un fichier Excel avant de lancer l'analyse.")
+        return
 
-        self.entry_a.config(state="normal")
-        self.entry_a.delete(0, tk.END)
-        self.entry_a.insert(0, f"{a:.3f} +/- {a_err:.3f}")
-        self.entry_a.config(state="readonly")
-
-        self.entry_b.config(state="normal")
-        self.entry_b.delete(0, tk.END)
-        self.entry_b.insert(0, f"{b:.3f} +/- {b_err:.3f}")
-        self.entry_b.config(state="readonly")
-
-        self.entry_c.config(state="normal")
-        self.entry_c.delete(0, tk.END)
-        self.entry_c.insert(0, f"{c:.3f} +/- {c_err:.3f}")
-        self.entry_c.config(state="readonly")
-        
-        self.plot_graph(t, Dg, popt, pcov)
-
-    def model(self, y, a, b, c):
-        return (a * y[5]) + (b * y[6])+ (c * y[7])
-
-    def plot_graph(self, t, Dg, popt, pcov):
-       self.canvas.delete("all")
+    initial_guess = (
+        0.1, 0.1, 0.1,  # ka, kb, kc
+        float(entry_I.get()),  # I
+        float(entry_V.get()),  # V
+        float(entry_H2O2_0.get()),  # H2O2_0
+        float(entry_pH.get()),  # pH
+        9.64853e4, #F
+    )
+    params, pcov = curve_fit(degradation_model, t_exp, Dg_exp, p0=initial_guess)
+    print("Nombre de paramètres retournés par curve_fit:", len(params))
+    ka_fit = params[0]
+    kb_fit = params[1]
+    kc_fit = params[2]
+    VM_0_fit = params[3]
+    I_fit = params[4]
+    V_fit = params[5]
+    H2O2_0_fit = params[6]
+    pH_fit = params[7]
     
-       plt.figure(figsize=(10,10))
-       plt.plot(t, Dg, 'bo', label="Données")
-    
-       t_fit = np.linspace(t.min(), t.max(), 100)
-       try:
-        Dg_fit = self.model(t_fit, *popt)
-        Dg_upper = self.model(t_fit, *(popt + np.sqrt(np.diag(pcov))))
-        Dg_lower = self.model(t_fit, *(popt - np.sqrt(np.diag(pcov))))
-       except Exception as e:
-            messagebox.showerror("Erreur de génération de courbe", str(e))
-            return
 
-       plt.plot(t_fit, Dg_fit, 'r-', label="Modèle")
-    
-       if isinstance(Dg_lower, np.ndarray):
-            t_stack = np.hstack((t_fit, t_fit[::-1]))
-            Dg_stack = np.hstack((Dg_upper, Dg_lower[::-1]))
-            plt.fill(t_stack, Dg_stack, facecolor='gray', alpha=0.2, label="Incertitude")
-    
-       plt.xlabel('temps')
-       plt.ylabel('degradation')
-       plt.title('Graphe Dg=f(t)')
-       plt.legend()
-    
-       plt.savefig('graph.png')
+    # Calcul des prédictions du modèle
+    t_model = np.linspace(t_exp.min(), t_exp.max(), 100)
+    Dg_model = degradation_model(t_model, ka_fit, kb_fit, kc_fit, VM_0_fit, I_fit, V_fit, H2O2_0_fit, pH_fit)
 
-       self.photo = tk.PhotoImage(file='graph.png')
-       self.canvas.create_image(0, 0, anchor='nw', image=self.photo)
-       
+    # Tracer les résultats
+    ax.clear()
+    ax.plot(t_exp, Dg_exp, 'o', label='Données expérimentales')
+    ax.plot(t_model, Dg_model, '-', label='Modèle ajusté')
+    # Ajoutez ici le code pour calculer et afficher les incertitudes sur le graphe
+    ax.set_xlabel('Temps')
+    ax.set_ylabel('Dégradation du VM')
+    ax.set_title('Dégradation du vert de malachite en fonction de la concentration des radicaux')
+    ax.legend()
+    canvas.draw()
+
+    label_ka_value.config(text=f"{ka_fit:.4f}")
+    label_kb_value.config(text=f"{kb_fit:.4f}")
+    label_kc_value.config(text=f"{kc_fit:.4f}")
+
 root = tk.Tk()
-root.title("Importer fichier Excel et Fitting")
-app = Application(master=root)
+root.title("Analyse de dégradation du colorant vert de malachite")
 
-tk.Label(root, text="I (mA)").grid(row=0, column=0)
-entry_I = Entry(root)
-entry_I.grid(row=0, column=1)
+# Importer le fichier Excel
+button_import = tk.Button(root, text="Importer le fichier Excel", command=import_excel)
+button_import.pack(padx=10, pady=10)
 
-tk.Label(root, text="V (mL)").grid(row=0, column=2)
-entry_V = Entry(root)
-entry_V.grid(row=0, column=3)
+# Concentration initiale de VM
+label_VM_0 = tk.Label(root, text="Concentration initiale de VM (VM_0):")
+label_VM_0.pack()
+entry_VM_0 = tk.Entry(root)
+entry_VM_0.pack(padx=10, pady=10)
 
-tk.Label(root, text="H2O2 (M)").grid(row=0, column=4)
-entry_H2O2 = Entry(root)
-entry_H2O2.grid(row=0, column=5)
+# Valeur de I
+label_I = tk.Label(root, text="Intensité du courant (I):")
+label_I.pack()
+entry_I = tk.Entry(root)
+entry_I.pack(padx=10, pady=10)
 
-tk.Label(root, text="pH").grid(row=0, column=6)
-entry_pH = Entry(root)
-entry_pH.grid(row=0, column=7)
+# Valeur de V
+label_V = tk.Label(root, text="Volume de la solution (V):")
+label_V.pack()
+entry_V = tk.Entry(root)
+entry_V.pack(padx=10, pady=10)
 
-tk.Label(root, text="a:").grid(row=1, column=0)
-entry_a = tk.Entry(root, state="readonly")
-entry_a.grid(row=1, column=1)
+# Concentration initiale de H2O2
+label_H2O2_0 = tk.Label(root, text="Concentration initiale de H2O2:")
+label_H2O2_0.pack()
+entry_H2O2_0 = tk.Entry(root)
+entry_H2O2_0.pack(padx=10, pady=10)
 
-tk.Label(root, text="b:").grid(row=1, column=2)
-entry_b = tk.Entry(root, state="readonly")
-entry_b.grid(row=1, column=3)
+# Valeur du pH
+label_pH = tk.Label(root, text="Valeur du pH:")
+label_pH.pack()
+entry_pH = tk.Entry(root)
+entry_pH.pack(padx=10, pady=10)
 
-tk.Label(root, text="c:").grid(row=1, column=4)
-entry_c = tk.Entry(root, state="readonly")
-entry_c.grid(row=1, column=5)
+# Lancer l'analyse
+button_analyze = tk.Button(root, text="Lancer l'analyse", command=analyze)
+button_analyze.pack(padx=10, pady=10)
 
-tk.Button(root, text="Importer fichier Excel", command=app.import_excel).grid(row=2, columnspan=2)
-tk.Button(root, text="Run Simulation", command=run_simulation).grid(row=3, columnspan=2)
+# Créer le graphe
+fig, ax = plt.subplots()
+canvas = FigureCanvasTkAgg(fig, master=root)
+canvas.draw()
+canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
 
-canvas = tk.Canvas(root, width=1000, height=1000)
-canvas.grid(row=10, columnspan=2)
+# Afficher les constantes cinétiques
+label_ka = tk.Label(root, text="Constante cinétique (ka):")
+label_ka.pack()
+label_ka_value = tk.Label(root, text="")
+label_ka_value.pack()
+
+label_kb = tk.Label(root, text="Constante cinétique (kb):")
+label_kb.pack()
+label_kb_value = tk.Label(root, text="")
+label_kb_value.pack()
+
+label_kc = tk.Label(root, text="Constante cinétique (kc):")
+label_kc.pack()
+label_kc_value = tk.Label(root, text="")
+label_kc_value.pack()
 
 root.mainloop()
 
